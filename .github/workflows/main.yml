@@ -8,13 +8,9 @@ on:
         required: true
         default: "eu-west-2"
       action:
-        description: "Terraform action to perform"
+        description: "Terraform action to perform (apply or destroy)"
         required: true
         default: "apply"
-        type: choice
-        options:
-          - apply
-          - destroy
 
 jobs:
   deploy:
@@ -38,7 +34,6 @@ jobs:
       - name: Terraform Init
         run: terraform init
 
-      # Conditionally run apply or destroy
       - name: Terraform Apply or Destroy
         run: |
           if [[ "${{ github.event.inputs.action }}" == "apply" ]]; then
@@ -47,7 +42,6 @@ jobs:
             terraform destroy -auto-approve -var="aws_region=${{ env.AWS_REGION }}"
           fi
 
-      # Only run these steps if action is "apply"
       - name: Get EC2 Instance Public IP
         id: getip
         if: ${{ github.event.inputs.action == 'apply' }}
