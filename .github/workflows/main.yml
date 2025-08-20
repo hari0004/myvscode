@@ -7,6 +7,14 @@ on:
         description: "AWS Region"
         required: true
         default: "eu-west-2"
+      action:
+        description: "Terraform action to perform"
+        required: true
+        default: "apply"
+        type: choice
+        options:
+          - apply
+          - destroy
 
 jobs:
   deploy:
@@ -14,14 +22,12 @@ jobs:
 
     env:
       AWS_REGION: ${{ github.event.inputs.aws_region }}
-      INSTANCE_NAME: "DevOps-ubuntu"  # must match Terraform tag
+      INSTANCE_NAME: "DevOps-ubuntu"
 
     steps:
-      # Checkout repo (Terraform code must be in repo)
       - name: Checkout
         uses: actions/checkout@v4
 
-      # Configure AWS credentials (from GitHub secrets)
       - name: Configure AWS Credentials
         uses: aws-actions/configure-aws-credentials@v4
         with:
@@ -29,16 +35,22 @@ jobs:
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           aws-region: ${{ env.AWS_REGION }}
 
-      # Terraform Init & Apply
       - name: Terraform Init
         run: terraform init
 
-      - name: Terraform Apply
-        run: terraform apply -auto-approve -var="aws_region=${{ env.AWS_REGION }}"
+      # Conditionally run apply or destroy
+      - name: Terraform Apply or Destroy
+        run: |
+          if [[ "${{ github.event.inputs.action }}" == "apply" ]]; then
+            terraform apply -auto-approve -var="aws_region=${{ env.AWS_REGION }}"
+          else
+            terraform destroy -auto-approve -var="aws_region=${{ env.AWS_REGION }}"
+          fi
 
-      # Get EC2 Instance Public IP
+      # Only run these steps if action is "apply"
       - name: Get EC2 Instance Public IP
         id: getip
+        if: ${{ github.event.inputs.action == 'apply' }}
         run: |
           INSTANCE_ID=$(aws ec2 describe-instances \
             --filters "Name=tag:Name,Values=${INSTANCE_NAME}" \
@@ -52,33 +64,26 @@ jobs:
             --region $AWS_REGION \
             --output text)
 
-          echo "INSTANCE_ID=$INSTANCE_ID" >> $GITHUB_ENV
-          echo "PUBLIC_IP=$PUBLIC_IP" >> $GITHUB_ENV
-          echo "Public IP: $PUBLIC_IP"
+          echo "public_ip=$PUBLIC_IP" >> $GITHUB_OUTPUT
 
-      # Deploy Website (via SSH)
       - name: Deploy Website on EC2
+        if: ${{ github.event.inputs.action == 'apply' }}
         run: |
-          ssh -o StrictHostKeyChecking=no -i ~/.ssh/deploy-key ubuntu@${PUBLIC_IP} <<'EOF'
+          ssh -o StrictHostKeyChecking=no -i ~/.ssh/deploy-key ubuntu@${{ steps.getip.outputs.public_ip }} <<'EOF'
             sudo apt-get update -y
 
-            # Apache check
             if ! dpkg -s apache2 >/dev/null 2>&1; then
-              echo "Apache not found. Installing..."
               sudo apt-get install -y apache2
               sudo systemctl start apache2
               sudo systemctl enable apache2
             else
-              echo "Apache already installed"
               sudo systemctl start apache2
             fi
 
-            # unzip check
             if ! command -v unzip &> /dev/null; then
               sudo apt-get install -y unzip
             fi
 
-            # Deploy template
             cd /var/www/html
             sudo rm -rf ./*
             wget https://templatemo.com/tm-zip-files-2020/templatemo_596_electric_xtra.zip -O site.zip
@@ -88,6 +93,6 @@ jobs:
             sudo chown -R www-data:www-data /var/www/html
           EOF
 
-      # Print URL
       - name: Website URL
-        run: echo "Website is deployed at: http://${PUBLIC_IP}"
+        if: ${{ github.event.inputs.action == 'apply' }}
+        run: echo "Website is deployed at: http://${{ steps.getip.outputs.public_ip }}"
