@@ -87,6 +87,4 @@ jobs:
             sudo chown -R www-data:www-data /var/www/html
           EOF
 
-      - name: Website URL
-        if: ${{ github.event.inputs.action == 'apply' }}
-        run: echo "Website is deployed at: http://${{ steps.getip.outputs.public_ip }}"
+    
