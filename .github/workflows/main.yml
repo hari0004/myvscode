@@ -1,47 +1,93 @@
-name: Terraform Pipeline
+name: Deploy Website on EC2
 
 on:
   workflow_dispatch:
     inputs:
-      action:
-        description: 'Terraform action to perform'
+      aws_region:
+        description: "AWS Region"
         required: true
-        default: 'apply'
-        type: choice
-        options:
-          - apply
-          - destroy
+        default: "eu-west-2"
 
 jobs:
-  terraform:
+  deploy:
     runs-on: ubuntu-latest
 
+    env:
+      AWS_REGION: ${{ github.event.inputs.aws_region }}
+      INSTANCE_NAME: "DevOps-ubuntu"  # must match Terraform tag
+
     steps:
-      - name: Checkout code
+      # Checkout repo (Terraform code must be in repo)
+      - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Setup Terraform
-        uses: hashicorp/setup-terraform@v3
-        with:
-          terraform_version: 1.8.0  # Adjust if needed
-
-      - name: Configure AWS credentials
-        uses: aws-actions/configure-aws-credentials@v2
+      # Configure AWS credentials (from GitHub secrets)
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v4
         with:
           aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-          aws-region: eu-west-2  # Change if your bucket is in a different region
+          aws-region: ${{ env.AWS_REGION }}
 
+      # Terraform Init & Apply
       - name: Terraform Init
         run: terraform init
 
-      - name: Terraform Plan
-        run: terraform plan -out=tfplan
-
       - name: Terraform Apply
-        if: ${{ github.event.inputs.action == 'apply' }}
-        run: terraform apply -auto-approve tfplan
+        run: terraform apply -auto-approve -var="aws_region=${{ env.AWS_REGION }}"
 
-      - name: Terraform Destroy
-        if: ${{ github.event.inputs.action == 'destroy' }}
-        run: terraform destroy -auto-approve
+      # Get EC2 Instance Public IP
+      - name: Get EC2 Instance Public IP
+        id: getip
+        run: |
+          INSTANCE_ID=$(aws ec2 describe-instances \
+            --filters "Name=tag:Name,Values=${INSTANCE_NAME}" \
+            --query "Reservations[0].Instances[0].InstanceId" \
+            --region $AWS_REGION \
+            --output text)
+
+          PUBLIC_IP=$(aws ec2 describe-instances \
+            --instance-ids $INSTANCE_ID \
+            --query "Reservations[0].Instances[0].PublicIpAddress" \
+            --region $AWS_REGION \
+            --output text)
+
+          echo "INSTANCE_ID=$INSTANCE_ID" >> $GITHUB_ENV
+          echo "PUBLIC_IP=$PUBLIC_IP" >> $GITHUB_ENV
+          echo "Public IP: $PUBLIC_IP"
+
+      # Deploy Website (via SSH)
+      - name: Deploy Website on EC2
+        run: |
+          ssh -o StrictHostKeyChecking=no -i ~/.ssh/deploy-key ubuntu@${PUBLIC_IP} <<'EOF'
+            sudo apt-get update -y
+
+            # Apache check
+            if ! dpkg -s apache2 >/dev/null 2>&1; then
+              echo "Apache not found. Installing..."
+              sudo apt-get install -y apache2
+              sudo systemctl start apache2
+              sudo systemctl enable apache2
+            else
+              echo "Apache already installed"
+              sudo systemctl start apache2
+            fi
+
+            # unzip check
+            if ! command -v unzip &> /dev/null; then
+              sudo apt-get install -y unzip
+            fi
+
+            # Deploy template
+            cd /var/www/html
+            sudo rm -rf ./*
+            wget https://templatemo.com/tm-zip-files-2020/templatemo_596_electric_xtra.zip -O site.zip
+            unzip site.zip
+            sudo mv templatemo_596_electric_xtra/* .
+            sudo rm -rf templatemo_596_electric_xtra site.zip
+            sudo chown -R www-data:www-data /var/www/html
+          EOF
+
+      # Print URL
+      - name: Website URL
+        run: echo "Website is deployed at: http://${PUBLIC_IP}"
